@@ -54,7 +54,7 @@ Bu depo o sistemin, bize özel her şeyden arındırılmış hali.
 ## Kurulum
 
 ```bash
-git clone https://github.com/Oto-Pilot-seo/pandermos.git
+git clone https://github.com/pandermos/pandermos.git
 cd pandermos
 sudo ./install.sh
 claude setup-token                              # tarayıcısı olan herhangi bir makinede

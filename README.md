@@ -5,7 +5,7 @@
 **An always-on Claude Code auditor that lives on your server.**
 It checks your sites, apps and content on a schedule, fixes what it safely can, and sends you a short message when something needs a human.
 
-[![CI](https://github.com/Oto-Pilot-seo/pandermos/actions/workflows/ci.yml/badge.svg)](https://github.com/Oto-Pilot-seo/pandermos/actions/workflows/ci.yml)
+[![CI](https://github.com/pandermos/pandermos/actions/workflows/ci.yml/badge.svg)](https://github.com/pandermos/pandermos/actions/workflows/ci.yml)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Shell](https://img.shields.io/badge/bash-single%20file-4EAA25.svg)
 ![Claude Code](https://img.shields.io/badge/runs%20on-Claude%20Code-D97757.svg)
@@ -72,7 +72,7 @@ It worked well enough that the same loop now watches every site, app and databas
 Requirements: a Linux server with systemd, Bash 4+, `jq`, `curl`, Node.js 18+ (for the Claude Code CLI).
 
 ```bash
-git clone https://github.com/Oto-Pilot-seo/pandermos.git
+git clone https://github.com/pandermos/pandermos.git
 cd pandermos
 sudo ./install.sh                 # audit-ish: no sudo for the agent
 ```

@@ -1,6 +1,6 @@
 [Unit]
 Description=Pandermos, always-on Claude Code auditor
-Documentation=https://github.com/Oto-Pilot-seo/pandermos
+Documentation=https://github.com/pandermos/pandermos
 After=network-online.target
 Wants=network-online.target
 

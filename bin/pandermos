@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pandermos: an always-on Claude Code auditor for your servers and websites.
-# https://github.com/Oto-Pilot-seo/pandermos
+# https://github.com/pandermos/pandermos
 set -uo pipefail
 
 VERSION="0.1.0"
