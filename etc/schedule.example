@@ -1,0 +1,20 @@
+# Pandermos schedule: one task per line.
+#
+#   task            model    timeout   when
+#
+# task     = file name in $PANDERMOS_HOME/tasks without .md
+# model    = sonnet | opus | haiku | any model id `claude --model` accepts
+# timeout  = coreutils timeout syntax: 30m, 1h, 90m
+# when     = every N        run on every Nth scheduler turn (turn = LOOP_SLEEP seconds + run time)
+#            at HH:MM[,..]  run once a day after each listed time
+#            manual         never scheduled, only `pandermos run <task>`
+
+server-health    sonnet   20m   every 2
+website-health   sonnet   30m   every 4
+security         sonnet   30m   at 03:30
+
+# Enable after editing the task file for your setup:
+#app-logs        sonnet   20m   every 3
+#database        sonnet   20m   at 06:00
+#wordpress-news  sonnet   40m   every 1
+#improve         opus     90m   at 04:00,14:00

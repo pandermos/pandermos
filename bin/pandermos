@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+# Pandermos: an always-on Claude Code auditor for your servers and websites.
+# https://github.com/Oto-Pilot-seo/pandermos
+set -uo pipefail
+
+VERSION="0.1.0"
+CONF_DIR="${PANDERMOS_CONF:-/etc/pandermos}"
+
+# shellcheck disable=SC1091
+[ -f "$CONF_DIR/pandermos.conf" ] && . "$CONF_DIR/pandermos.conf"
+
+PANDERMOS_HOME="${PANDERMOS_HOME:-/var/lib/pandermos}"
+TZ_NAME="${TZ_NAME:-UTC}"
+LOOP_SLEEP="${LOOP_SLEEP:-1500}"
+MAX_TURNS="${MAX_TURNS:-150}"
+ALLOWED_TOOLS="${ALLOWED_TOOLS:-Bash,Read,Grep,Glob,Write,Edit,WebFetch,WebSearch}"
+DEFAULT_MODEL="${DEFAULT_MODEL:-sonnet}"
+DEFAULT_TIMEOUT="${DEFAULT_TIMEOUT:-30m}"
+LIMIT_BACKOFF="${LIMIT_BACKOFF:-3600}"
+REPORT_RETENTION_DAYS="${REPORT_RETENTION_DAYS:-14}"
+BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
+DIGEST_AT="${DIGEST_AT:-09:00}"
+FAIL_ALERT_AFTER="${FAIL_ALERT_AFTER:-2}"
+TASK_GAP="${TASK_GAP:-60}"
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+EXTRA_CLAUDE_ARGS="${EXTRA_CLAUDE_ARGS:-}"
+SCHEDULE_FILE="${SCHEDULE_FILE:-$CONF_DIR/schedule}"
+SECRETS_FILE="${SECRETS_FILE:-$CONF_DIR/secrets.env}"
+
+TASKS="$PANDERMOS_HOME/tasks"
+REPORTS="$PANDERMOS_HOME/reports"
+STATE="$PANDERMOS_HOME/state"
+BACKUPS="$PANDERMOS_HOME/backups"
+USAGE="$STATE/usage.tsv"
+
+die() { echo "pandermos: $*" >&2; exit 1; }
+now() { TZ="$TZ_NAME" date "$@"; }
+minutes_of() { local h=${1%%:*} m=${1##*:}; echo $((10#$h * 60 + 10#$m)); }
+
+load_secrets() {
+  [ -r "$SECRETS_FILE" ] || return 0
+  set -a
+  # shellcheck disable=SC1090
+  . "$SECRETS_FILE"
+  set +a
+}
+
+ensure_dirs() { mkdir -p "$TASKS" "$REPORTS" "$STATE" "$BACKUPS"; }
+
+notify() {
+  local text="$1"
+  if [ -n "${NOTIFY_DRY_RUN:-}" ]; then
+    printf '%s\n---\n' "$text" >> "$STATE/notify.log"
+    return 0
+  fi
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+    curl -s -o /dev/null --max-time 20 \
+      "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${text}"
+  fi
+  if [ -n "${WEBHOOK_URL:-}" ]; then
+    jq -n --arg t "$text" '{text: $t, content: $t}' |
+      curl -s -o /dev/null --max-time 20 -H 'Content-Type: application/json' -d @- "$WEBHOOK_URL"
+  fi
+}
+
+last_report() { find "$REPORTS" -maxdepth 1 -name "$1-*.md" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-; }
+
+# Last STATUS/NOTIFY line of a report (DURUM/TELEGRAM accepted for Turkish task files).
+report_field() {
+  local file="$1" key="$2"
+  tac "$file" 2>/dev/null | grep -m1 -oP "^\*{0,2}(${key})\*{0,2}:\s*\K.*" | sed 's/[[:space:]]*$//'
+}
+
+normalize_status() {
+  case "${1^^}" in
+    CLEAN|TEMIZ) echo CLEAN ;;
+    FIXED|DUZELTILDI) echo FIXED ;;
+    WARNING|WARN|UYARI) echo WARNING ;;
+    CRITICAL|KRITIK) echo CRITICAL ;;
+    *) echo UNKNOWN ;;
+  esac
+}
+
+limit_active() {
+  local since
+  since=$(cat "$STATE/.limit" 2>/dev/null || echo 0)
+  [ $(( $(date +%s) - since )) -lt "$LIMIT_BACKOFF" ]
+}
+
+cmd_run() {
+  local task="" model="" timeout_="" extra=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --model) model="$2"; shift 2 ;;
+      --timeout) timeout_="$2"; shift 2 ;;
+      --note) extra="$2"; shift 2 ;;
+      -*) die "unknown option $1" ;;
+      *) task="$1"; shift ;;
+    esac
+  done
+  [ -n "$task" ] || die "usage: pandermos run <task> [--model m] [--timeout 30m] [--note text]"
+  [[ "$task" =~ ^[A-Za-z0-9._-]+$ ]] || die "bad task name: $task"
+  [ -f "$TASKS/$task.md" ] || die "no such task: $TASKS/$task.md"
+  model="${model:-$DEFAULT_MODEL}"; timeout_="${timeout_:-$DEFAULT_TIMEOUT}"
+  ensure_dirs; load_secrets
+
+  exec 9>"$STATE/.lock-$task"
+  flock -n 9 || { echo "pandermos: $task is already running" >&2; return 3; }
+
+  local stamp report prev log err code
+  stamp=$(now +%Y%m%d-%H%M)
+  report="$REPORTS/$task-$stamp.md"
+  prev=$(last_report "$task")
+  log="$STATE/last-$task.json"; err="$STATE/last-$task.err"
+
+  local prompt
+  prompt="$(cat "$TASKS/$task.md")
+
+---
+Current time: $(now '+%Y-%m-%d %H:%M %Z')
+Write your report to: $report
+Previous report: ${prev:-none}
+State directory for this task: $STATE
+Backups go under: $BACKUPS/$stamp/
+${extra:+Operator note: $extra}"
+
+  cd "$PANDERMOS_HOME" || die "cannot cd to $PANDERMOS_HOME"
+  # shellcheck disable=SC2086
+  timeout --kill-after=60 "$timeout_" "$CLAUDE_BIN" -p "$prompt" \
+    --model "$model" --max-turns "$MAX_TURNS" \
+    --allowedTools "$ALLOWED_TOOLS" --output-format json $EXTRA_CLAUDE_ARGS \
+    > "$log" 2> "$err"
+  code=$?
+
+  jq -r --arg t "$stamp" --arg task "$task" --arg m "$model" '[
+      $t, $task, $m, (.num_turns // 0), ((.duration_ms // 0) / 60000 | floor),
+      (.total_cost_usd // 0),
+      ((.usage.input_tokens // 0) + (.usage.cache_read_input_tokens // 0) + (.usage.cache_creation_input_tokens // 0)),
+      (.usage.output_tokens // 0), (.is_error // false)
+    ] | @tsv' "$log" >> "$USAGE" 2>/dev/null || true
+
+  if grep -qiE 'usage limit|rate.?limit|limit reached|5-hour limit' "$log" "$err" 2>/dev/null; then
+    date +%s > "$STATE/.limit"
+  fi
+
+  if [ ! -s "$report" ]; then
+    local n
+    n=$(( $(cat "$STATE/.fail-$task" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$STATE/.fail-$task"
+    if [ "$n" -eq "$FAIL_ALERT_AFTER" ]; then
+      notify "Pandermos: task '$task' produced no report $n times in a row (exit $code). Tail: $(tail -c 400 "$log" "$err" 2>/dev/null)"
+    fi
+    echo "pandermos: $task finished without a report (exit $code)" >&2
+    return 1
+  fi
+  rm -f "$STATE/.fail-$task"
+
+  local status msg hash
+  status=$(normalize_status "$(report_field "$report" 'STATUS|DURUM')")
+  msg=$(report_field "$report" 'NOTIFY|TELEGRAM')
+  echo "$task: $status -> $report"
+  if [ "$status" != CLEAN ] && [ -n "$msg" ] && [ "$msg" != "-" ]; then
+    hash=$(printf '%s' "$msg" | sha1sum | cut -c1-12)
+    if [ "$hash" != "$(cat "$STATE/.notified-$task" 2>/dev/null)" ]; then
+      notify "[$task · $status] $msg"
+      echo "$hash" > "$STATE/.notified-$task"
+    fi
+  fi
+
+  find "$REPORTS" -name '*.md' -mtime +"$REPORT_RETENTION_DAYS" -delete 2>/dev/null
+  find "$BACKUPS" -mindepth 1 -maxdepth 1 -mtime +"$BACKUP_RETENTION_DAYS" -exec rm -rf {} + 2>/dev/null
+  return 0
+}
+
+schedule_lines() {
+  [ -f "$SCHEDULE_FILE" ] || die "no schedule file at $SCHEDULE_FILE"
+  grep -vE '^\s*(#|$)' "$SCHEDULE_FILE"
+}
+
+# Prints "task model timeout" for each entry due on this loop turn.
+due_tasks() {
+  local turn="$1" today nowm task model to kind arg t
+  today=$(now +%F); nowm=$(minutes_of "$(now +%H:%M)")
+  while read -r task model to kind arg _; do
+    case "$kind" in
+      every)
+        [ $(( turn % ${arg:-1} )) -eq 0 ] && echo "$task $model $to" ;;
+      at|daily)
+        for t in ${arg//,/ }; do
+          local mark="$STATE/.at-$task-${t/:/}"
+          if [ "$nowm" -ge "$(minutes_of "$t")" ] && [ "$(cat "$mark" 2>/dev/null)" != "$today" ]; then
+            echo "$today" > "$mark"
+            echo "$task $model $to"
+            break
+          fi
+        done ;;
+      manual|"") ;;
+      *) echo "pandermos: unknown schedule kind '$kind' for $task" >&2 ;;
+    esac
+  done < <(schedule_lines)
+}
+
+send_digest() {
+  local today summary="" task status r
+  today=$(now +%F)
+  [ "$(cat "$STATE/.digest" 2>/dev/null)" = "$today" ] && return 0
+  [ "$(minutes_of "$(now +%H:%M)")" -ge "$(minutes_of "$DIGEST_AT")" ] || return 0
+  while read -r task _; do
+    r=$(last_report "$task")
+    [ -n "$r" ] || continue
+    status=$(normalize_status "$(report_field "$r" 'STATUS|DURUM')")
+    summary+=$'\n'"$task: $status"
+  done < <(schedule_lines)
+  local cost
+  cost=$(awk -F'\t' -v since="$(now -d '-1 day' +%Y%m%d-%H%M)" '$1 >= since {c += $6; n++} END {printf "%d runs, $%.2f API-equivalent", n, c}' "$USAGE" 2>/dev/null)
+  notify "Pandermos daily digest ($today)${summary}"$'\n'"Last 24h: ${cost:-no runs}" && echo "$today" > "$STATE/.digest"
+}
+
+cmd_loop() {
+  ensure_dirs
+  local turn=0 task model to
+  echo "pandermos $VERSION loop started (home=$PANDERMOS_HOME, schedule=$SCHEDULE_FILE)"
+  while true; do
+    load_secrets
+    if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}" ]; then
+      echo "pandermos: no Claude credentials in $SECRETS_FILE, waiting" >&2
+      sleep 300; continue
+    fi
+    if limit_active; then
+      echo "pandermos: usage limit hit recently, backing off"
+      sleep 900; continue
+    fi
+    while read -r task model to; do
+      [ -n "$task" ] || continue
+      limit_active && break
+      cmd_run "$task" --model "$model" --timeout "$to"
+      sleep "$TASK_GAP"
+    done < <(due_tasks "$turn")
+    send_digest
+    turn=$((turn + 1))
+    [ -n "${PANDERMOS_ONE_TURN:-}" ] && return 0
+    sleep "$LOOP_SLEEP"
+  done
+}
+
+cmd_status() {
+  ensure_dirs
+  printf '%-22s %-9s %-17s %s\n' TASK STATUS LAST-RUN SCHEDULE
+  while read -r task model to kind arg _; do
+    local r status when
+    r=$(last_report "$task")
+    status=-; when=-
+    if [ -n "$r" ]; then
+      status=$(normalize_status "$(report_field "$r" 'STATUS|DURUM')")
+      when=$(basename "$r" .md); when=${when#"$task"-}
+    fi
+    [ -e "$STATE/.lock-$task" ] && ! flock -n "$STATE/.lock-$task" true 2>/dev/null && status="RUNNING"
+    printf '%-22s %-9s %-17s %s\n' "$task" "$status" "$when" "$kind ${arg:-} ($model, $to)"
+  done < <(schedule_lines)
+  limit_active && echo && echo "Usage limit back-off active until $(date -d "@$(( $(cat "$STATE/.limit") + LIMIT_BACKOFF ))")"
+  return 0
+}
+
+cmd_usage() {
+  local days="${1:-1}" since
+  since=$(now -d "-$days day" +%Y%m%d-%H%M)
+  [ -f "$USAGE" ] || { echo "no runs recorded yet"; return 0; }
+  awk -F'\t' -v since="$since" '
+    $1 >= since { n[$2]++; m[$2] += $5; c[$2] += $6; o[$2] += $8; tn++; tm += $5; tc += $6 }
+    END {
+      printf "%-22s %5s %8s %12s %10s\n", "TASK", "RUNS", "MINUTES", "OUT-TOKENS", "API-USD"
+      for (k in n) printf "%-22s %5d %8d %12d %10.2f\n", k, n[k], m[k], o[k], c[k]
+      printf "%-22s %5d %8d %12s %10.2f\n", "total", tn, tm, "", tc
+    }' "$USAGE"
+  echo "(API-USD is what the same tokens would cost on the API; on a Max plan it shows how fast you use your quota.)"
+}
+
+cmd_report() {
+  local r
+  r=$(last_report "${1:?usage: pandermos report <task>}")
+  [ -n "$r" ] || die "no report for $1"
+  echo "# $r"; cat "$r"
+}
+
+cmd_doctor() {
+  local ok=0
+  check() { if eval "$2" >/dev/null 2>&1; then echo "  ok    $1"; else echo "  FAIL  $1${3:+  -> $3}"; ok=1; fi; }
+  load_secrets
+  echo "pandermos $VERSION"
+  check "claude CLI" "command -v $CLAUDE_BIN" "npm install -g @anthropic-ai/claude-code"
+  check "jq" "command -v jq" "apt install jq"
+  check "curl" "command -v curl"
+  check "flock" "command -v flock"
+  check "config $CONF_DIR/pandermos.conf" "[ -f '$CONF_DIR/pandermos.conf' ]"
+  check "schedule $SCHEDULE_FILE" "[ -f '$SCHEDULE_FILE' ]"
+  check "secrets readable" "[ -r '$SECRETS_FILE' ]"
+  check "Claude credentials" "[ -n \"\${CLAUDE_CODE_OAUTH_TOKEN:-}\${ANTHROPIC_API_KEY:-}\" ]" "claude setup-token, then put CLAUDE_CODE_OAUTH_TOKEN in $SECRETS_FILE"
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}${WEBHOOK_URL:-}" ]; then echo "  ok    notifications"; else echo "  warn  notifications not configured (optional: Telegram or WEBHOOK_URL)"; fi
+  check "rules file $PANDERMOS_HOME/CLAUDE.md" "[ -f '$PANDERMOS_HOME/CLAUDE.md' ]"
+  if [ -f "$SCHEDULE_FILE" ]; then
+    while read -r task _; do
+      check "task file $task.md" "[ -f '$TASKS/$task.md' ]"
+    done < <(schedule_lines)
+  fi
+  return $ok
+}
+
+usage() {
+  cat <<EOF
+pandermos $VERSION: an always-on Claude Code auditor
+
+  pandermos loop                     run the scheduler (systemd runs this)
+  pandermos run <task> [--model m] [--timeout 40m] [--note "..."]
+  pandermos status                   last result of every scheduled task
+  pandermos usage [days]             runs, minutes and token cost per task
+  pandermos report <task>            print the latest report
+  pandermos notify "text"            send a test notification
+  pandermos doctor                   check the installation
+
+Config: $CONF_DIR   Home: $PANDERMOS_HOME
+EOF
+}
+
+case "${1:-}" in
+  run) shift; cmd_run "$@" ;;
+  loop) cmd_loop ;;
+  status) cmd_status ;;
+  usage) shift; cmd_usage "$@" ;;
+  report) shift; cmd_report "$@" ;;
+  notify) shift; ensure_dirs; load_secrets; notify "${1:-Pandermos test message}" ;;
+  doctor) cmd_doctor ;;
+  version|--version|-v) echo "$VERSION" ;;
+  ""|help|-h|--help) usage ;;
+  *) usage; exit 2 ;;
+esac

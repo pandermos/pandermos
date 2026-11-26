@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Stand-in for `claude -p` used by the test suite. Behaviour is chosen by FAKE_MODE.
+prompt="$2"
+report=$(printf '%s\n' "$prompt" | sed -n 's/^Write your report to: //p')
+case "${FAKE_MODE:-fixed}" in
+  clean)   printf '# Report\nAll good.\n\nSTATUS: CLEAN\nNOTIFY: -\n' > "$report" ;;
+  fixed)   printf '# Report\n## Fixed\n- restarted nginx\n\nSTATUS: FIXED\nNOTIFY: nginx was down, restarted it\n' > "$report" ;;
+  turkish) printf '# Rapor\n\nDURUM: UYARI\nTELEGRAM: disk yüzde 91\n' > "$report" ;;
+  noreport) : ;;
+  limit)   echo '{"is_error":true,"result":"Claude AI usage limit reached"}'; exit 1 ;;
+esac
+echo '{"num_turns":7,"duration_ms":125000,"total_cost_usd":0.42,"usage":{"input_tokens":100,"cache_read_input_tokens":5000,"cache_creation_input_tokens":300,"output_tokens":900},"is_error":false}'

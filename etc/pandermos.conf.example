@@ -1,0 +1,40 @@
+# Pandermos main configuration. Copied to /etc/pandermos/pandermos.conf by install.sh.
+# Every value here has a built-in default; uncomment only what you want to change.
+
+# Working directory: CLAUDE.md (rules), tasks/, reports/, state/, backups/, notes.md
+#PANDERMOS_HOME=/var/lib/pandermos
+
+# Time zone used for report names, "at" schedules and the daily digest.
+#TZ_NAME=UTC
+
+# Seconds to sleep between scheduler turns. "every 1" tasks run once per turn.
+#LOOP_SLEEP=1500
+
+# Defaults for tasks that do not set their own model / timeout.
+#DEFAULT_MODEL=sonnet
+#DEFAULT_TIMEOUT=30m
+
+# Hard cap on agent turns per run.
+#MAX_TURNS=150
+
+# Tools the agent may use without asking. Remove Write,Edit for a read-mostly auditor.
+#ALLOWED_TOOLS="Bash,Read,Grep,Glob,Write,Edit,WebFetch,WebSearch"
+
+# Extra flags passed to `claude -p` (for example --permission-mode or --mcp-config).
+#EXTRA_CLAUDE_ARGS=""
+
+# When a run hits the plan's usage limit, pause the whole loop this many seconds.
+#LIMIT_BACKOFF=3600
+
+# Housekeeping.
+#REPORT_RETENTION_DAYS=14
+#BACKUP_RETENTION_DAYS=30
+
+# Daily digest notification time (in TZ_NAME).
+#DIGEST_AT=09:00
+
+# Alert when a task fails to produce a report this many times in a row.
+#FAIL_ALERT_AFTER=2
+
+# Pause between two tasks in the same turn (seconds).
+#TASK_GAP=60

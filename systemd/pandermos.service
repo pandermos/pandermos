@@ -1,0 +1,20 @@
+[Unit]
+Description=Pandermos, always-on Claude Code auditor
+Documentation=https://github.com/Oto-Pilot-seo/pandermos
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pandermos
+Group=pandermos
+WorkingDirectory=/var/lib/pandermos
+ExecStart=/usr/local/bin/pandermos loop
+Restart=always
+RestartSec=60
+Nice=10
+MemoryMax=3G
+CPUQuota=200%
+Environment=HOME=/var/lib/pandermos
+
+[Install]
+WantedBy=multi-user.target

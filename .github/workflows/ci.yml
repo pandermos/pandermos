@@ -1,0 +1,13 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: shellcheck -x bin/pandermos install.sh uninstall.sh tests/run.sh tests/fixtures/fake-claude
+      - name: Tests
+        run: bash tests/run.sh
